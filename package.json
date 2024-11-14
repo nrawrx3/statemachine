@@ -1,7 +1,7 @@
 {
   "name": "@nrawrx3/statemachine",
   "version": "0.0.1",
-  "description": "common place to store our utils",
+  "description": "UML statemachine library",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "author": "soumik",

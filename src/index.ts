@@ -10,9 +10,9 @@ export type TaggedGuard<
   TriggerArgsTypeMap extends TriggerArgsMapBase,
   GuardTagType extends string
 > = [
-  GuardTagType,
-  (trigger: keyof TriggerArgsTypeMap, triggerArg: any) => boolean
-];
+    GuardTagType,
+    (trigger: keyof TriggerArgsTypeMap, triggerArg: any) => boolean
+  ];
 
 export type StateMachineTransitionSuccess<StateType extends StateTypeBase> = {
   resultKind: "success";
@@ -52,26 +52,59 @@ export type inferStateMachineFireResult<StateMachineType> =
     infer ErrorType,
     infer GuardTagType
   >
-    ? StateMachineFireResult<StateType, ErrorType, GuardTagType>
-    : never;
+  ? StateMachineFireResult<StateType, ErrorType, GuardTagType>
+  : never;
 
+
+// The data for a state node in the state node forest. This object only contains
+// info about a state and its relation with its parent and children. No info
+// about transitions. That is something the StateNode type will hold.
+export class StateTreeLinks<
+  StateType extends StateTypeBase,
+  TriggerArgsTypeMap extends TriggerArgsMapBase,
+  ErrorType,
+  GuardTagType extends string> {
+  parentNode: StateNode<StateType, TriggerArgsTypeMap, ErrorType, GuardTagType> = null;
+  substateNodes: StateNode<StateType, TriggerArgsTypeMap, ErrorType, GuardTagType>[] = [];
+
+  parentLink: StateTreeLinks<StateType, TriggerArgsTypeMap, ErrorType, GuardTagType> = null;
+  substateLinks: StateTreeLinks<StateType, TriggerArgsTypeMap, ErrorType, GuardTagType>[] = [];
+
+  state: NonNullable<StateType>;
+
+  constructor(state: NonNullable<StateType>) {
+    this.state = state;
+  }
+
+  isSubstateOf(state: StateType): boolean {
+    return this.parentLink?.state === state;
+  }
+
+  isDescendantOf(state: StateType): boolean {
+    if (this.parentLink?.state === state) {
+      return true;
+    }
+
+    return this.parentLink?.isDescendantOf(state) ?? false;
+  }
+
+  toJSON() {
+    return {
+      state: this.state,
+      parent: this.parentLink?.state,
+      substates: this.substateNodes.map((substate) => substate.link.toJSON()),
+    };
+  }
+}
+
+// Contains the state transition related info of the state.
 export class StateNode<
   StateType extends StateTypeBase,
   TriggerArgsTypeMap extends TriggerArgsMapBase,
   ErrorType,
   GuardTagType extends string
 > {
-  parent: StateNode<StateType, TriggerArgsTypeMap, ErrorType, GuardTagType> =
-    null;
-
-  substates: StateNode<
-    StateType,
-    TriggerArgsTypeMap,
-    ErrorType,
-    GuardTagType
-  >[] = [];
-
-  state: NonNullable<StateType>;
+  link: StateTreeLinks<StateType, TriggerArgsTypeMap, ErrorType, GuardTagType>;
 
   stateMachine: StateMachine<
     StateType,
@@ -116,8 +149,12 @@ export class StateNode<
       GuardTagType
     >
   ) {
-    this.state = state;
+    this.link = new StateTreeLinks(state);
     this.stateMachine = machine;
+  }
+
+  get state() {
+    return this.link.state;
   }
 
   onEntryFrom<T extends keyof TriggerArgsTypeMap>(
@@ -166,8 +203,12 @@ export class StateNode<
       GuardTagType
     >
   ) {
-    parentState.substates.push(this);
-    this.parent = parentState;
+    parentState.link.substateNodes.push(this);
+    this.link.parentNode = parentState;
+
+    parentState.link.substateLinks.push(this.link);
+    this.link.parentLink = parentState.link;
+
     this.stateMachine.setStateAsNonRoot(this.state);
     return this;
   }
@@ -176,11 +217,11 @@ export class StateNode<
     if (this.state === state) {
       return true;
     }
-    return this.parent?.IsInState(state) ?? false;
+    return this.link.parentNode?.IsInState(state) ?? false;
   }
 
   getParentState() {
-    return this.parent;
+    return this.link.parentNode;
   }
 
   private countStatesHavingThisAsParent(
@@ -188,7 +229,7 @@ export class StateNode<
     foundCount: number,
     states: StateType[]
   ) {
-    for (let substate of this.substates) {
+    for (let substate of this.link.substateNodes) {
       for (let i = 0; i < states.length; i++) {
         if (found[i]) {
           continue;
@@ -207,7 +248,7 @@ export class StateNode<
     }
 
     if (foundCount < states.length) {
-      for (let substate of this.substates) {
+      for (let substate of this.link.substateNodes) {
         substate.countStatesHavingThisAsParent(found, foundCount, states);
         if (foundCount >= states.length) {
           return foundCount;
@@ -283,8 +324,8 @@ export class StateNode<
 
     // Check if the parent (or ancestor) state permits the trigger. Call
     // decideNextState() recursively.
-    if (this.parent) {
-      return this.parent.decideNextState(trigger, arg);
+    if (this.link.parentNode) {
+      return this.link.parentNode.decideNextState(trigger, arg);
     }
 
     return { resultKind: "failed", errorKind: "noTransition" };
@@ -332,8 +373,8 @@ export class StateNode<
   getRootStateNode(): NonNullable<
     StateNode<StateType, TriggerArgsTypeMap, ErrorType, GuardTagType>
   > {
-    if (this.parent) {
-      return this.parent.getRootStateNode();
+    if (this.link.parentNode) {
+      return this.link.parentNode.getRootStateNode();
     }
     return this;
   }
@@ -364,7 +405,7 @@ export class StateNode<
       GuardTagType
     >[] = [];
 
-    for (let substate of root.substates) {
+    for (let substate of root.link.substateNodes) {
       const ancestor = StateNode.lowestCommonAncestor(substate, stateA, stateB);
       if (ancestor) {
         commonAncestors.push(ancestor);
@@ -399,7 +440,7 @@ export class StateMachine<
     StateNode<StateType, TriggerArgsMap, ErrorType, GuardTagType>
   > = new Map();
 
-  private rootStates = new Set<StateType>();
+  rootStates = new Set<StateType>();
 
   // Called when next state has been decided via a permit rule but corresponding onEntry callbacks have not been called yet.
   private onTransitioningCallback: (
@@ -470,7 +511,7 @@ export class StateMachine<
   ) {
     let obj = {};
 
-    for (let substate of root.substates) {
+    for (let substate of root.link.substateNodes) {
       obj = { ...obj, ...this.printStateTreeForRoot(substate) };
     }
     return { [root.state]: obj };
@@ -571,7 +612,7 @@ export class StateMachine<
         };
       }
 
-      s = s.parent;
+      s = s.link.parentNode;
     }
 
     // Call the onTransitioned callback.
@@ -589,6 +630,36 @@ export class StateMachine<
       reportedTransitions: reportedTransitions,
     };
   }
+
+  stateLinksTree(): Map<StateType, StateTreeLinks<StateType, TriggerArgsMap, ErrorType, GuardTagType>> {
+    const linksMap: Map<StateType, StateTreeLinks<StateType, TriggerArgsMap, ErrorType, GuardTagType>> = new Map();
+    this.rootStates.forEach((rootState) => {
+      const rootNode = this.stateMap.get(rootState);
+      const clonedTree = cloneStateLinksTree(rootNode.link, linksMap);
+    })
+
+    return linksMap;
+  }
+}
+
+// Clone the stateTreeLinks in the state node tree. Also fill the given linksMap while cloning.
+function cloneStateLinksTree<
+  StateType extends StateTypeBase,
+  TriggerArgsTypeMap extends TriggerArgsMapBase,
+  ErrorType,
+  GuardTagType extends string>(current: StateTreeLinks<StateType, TriggerArgsTypeMap, ErrorType, GuardTagType>,
+    linksMap: Map<StateType, StateTreeLinks<StateType, TriggerArgsTypeMap, ErrorType, GuardTagType>>,
+  ) {
+  const currentClone = new StateTreeLinks<StateType, TriggerArgsTypeMap, ErrorType, GuardTagType>(current.state);
+  linksMap.set(current.state, currentClone);
+
+  for (let substate of current.substateNodes) {
+    const substateLinks = cloneStateLinksTree(substate.link, linksMap);
+    substateLinks.parentLink = currentClone;
+    currentClone.substateLinks.push(substateLinks);
+  }
+
+  return currentClone;
 }
 
 // Helper type function to infer the type of the permit dynamic callback given
@@ -600,10 +671,10 @@ export type inferPermitDynamicCallbackType<StateMachineType> =
     infer ErrorType,
     infer GuardTagType
   >
-    ? (
-        triggerArg: TriggerArgsTypeMap[keyof TriggerArgsTypeMap]
-      ) => [StateType, ErrorType | null]
-    : never;
+  ? (
+    triggerArg: TriggerArgsTypeMap[keyof TriggerArgsTypeMap]
+  ) => [StateType, ErrorType | null]
+  : never;
 
 // Helper type function to infer the type of the permit callback given the
 // specialized type of the StateMachine<...>
@@ -614,11 +685,11 @@ export type inferOnEntryFromCallbackType<StateMachineType> =
     infer ErrorType,
     infer GuardTagType
   >
-    ? (
-        triggerArg: TriggerArgsTypeMap[keyof TriggerArgsTypeMap],
-        previousState: StateType
-      ) => ErrorType | null
-    : never;
+  ? (
+    triggerArg: TriggerArgsTypeMap[keyof TriggerArgsTypeMap],
+    previousState: StateType
+  ) => ErrorType | null
+  : never;
 
 // Helper type function to infer the type of the permit callback given the
 // specialized type of the StateMachine<...>
@@ -629,8 +700,8 @@ export type inferOnEntryCallbackType<StateMachineType> =
     infer ErrorType,
     infer GuardTagType
   >
-    ? (previousState: StateType) => ErrorType | null
-    : never;
+  ? (previousState: StateType) => ErrorType | null
+  : never;
 
 // Helper type function to infer the type of the permit callback given the
 // specialized type of the StateMachine<...>
@@ -641,8 +712,8 @@ export type inferGuardCallbackType<StateMachineType> =
     infer ErrorType,
     infer GuardTagType
   >
-    ? (
-        trigger: keyof TriggerArgsTypeMap,
-        triggerArg: TriggerArgsTypeMap[keyof TriggerArgsTypeMap]
-      ) => boolean
-    : never;
+  ? (
+    trigger: keyof TriggerArgsTypeMap,
+    triggerArg: TriggerArgsTypeMap[keyof TriggerArgsTypeMap]
+  ) => boolean
+  : never;
